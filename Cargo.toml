@@ -2,7 +2,7 @@
 name = "retasks"
 version = "0.1.0"
 edition = "2021"
-authors = ["RetasksTeam"]
+authors = ["Eugen Soloviov"]
 description = "A tool for synchronizing GitHub issues with a local directory"
 
 [dependencies]
