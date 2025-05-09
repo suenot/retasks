@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{App, Arg};
-use hotwatch::{Hotwatch, Event as HotwatchEvent};
-use octorust::{auth::Credentials, Client};
+use hotwatch::{Hotwatch, Event};
+use octorust::{auth::Credentials, Client, types};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use tokio::runtime::Runtime;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Issue {
@@ -30,6 +31,9 @@ struct Config {
 }
 
 fn main() -> Result<()> {
+    // Create a tokio runtime for async operations
+    let rt = Runtime::new().context("Failed to create tokio runtime")?;
+
     let matches = App::new("GitHub Issues Sync")
         .version("1.0")
         .author("RetasksTeam")
@@ -103,13 +107,14 @@ fn main() -> Result<()> {
 
     // Initial sync from GitHub to local
     println!("Performing initial sync from GitHub to local...");
-    sync_github_to_local(&config).context("Failed to sync from GitHub to local")?;
+    rt.block_on(sync_github_to_local(&config)).context("Failed to sync from GitHub to local")?;
 
     if config.watch {
         println!("Watch mode enabled. Monitoring for changes...");
         
         let config_arc = Arc::new(config);
         let config_clone = Arc::clone(&config_arc);
+        let rt_clone = rt.clone();
         
         // Thread for periodic GitHub to local sync
         thread::spawn(move || {
@@ -117,7 +122,7 @@ fn main() -> Result<()> {
             loop {
                 thread::sleep(config.sync_interval);
                 println!("Performing scheduled sync from GitHub to local...");
-                if let Err(e) = sync_github_to_local(&config) {
+                if let Err(e) = rt_clone.block_on(sync_github_to_local(&config)) {
                     eprintln!("Error syncing from GitHub: {}", e);
                 }
             }
@@ -125,20 +130,18 @@ fn main() -> Result<()> {
 
         // Watch local directory for changes
         let config_clone = Arc::clone(&config_arc);
+        let rt_clone = rt.clone();
         let mut hotwatch = Hotwatch::new().context("Failed to initialize hotwatch")?;
         
-        hotwatch.watch(&config_arc.issues_dir, move |event: HotwatchEvent| {
-            match event {
-                HotwatchEvent::Write(path) | HotwatchEvent::Modify(path) => {
-                    if path.extension().map_or(false, |ext| ext == "md") {
-                        println!("Local file changed: {:?}", path);
-                        let config = &config_clone;
-                        if let Err(e) = sync_local_to_github(config, &path) {
-                            eprintln!("Error syncing to GitHub: {}", e);
-                        }
+        hotwatch.watch(&config_arc.issues_dir, move |event: Event| {
+            if let Event::Write(path) = event {
+                if path.extension().map_or(false, |ext| ext == "md") {
+                    println!("Local file changed: {:?}", path);
+                    let config = &config_clone;
+                    if let Err(e) = rt_clone.block_on(sync_local_to_github(config, &path)) {
+                        eprintln!("Error syncing to GitHub: {}", e);
                     }
-                },
-                _ => {}
+                }
             }
         }).context("Failed to watch directory")?;
 
@@ -153,24 +156,35 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn sync_github_to_local(config: &Config) -> Result<()> {
+async fn sync_github_to_local(config: &Config) -> Result<()> {
     let client = Client::new(
         "github-issues-sync".to_string(),
         Credentials::Token(config.token.clone()),
     )?;
 
     let issues_client = client.issues();
-    let issues = issues_client.list(
+    let issues_filter = types::Filter::All;
+    let issues_state = types::IssuesListState::All;
+    let issues_sort = types::IssuesListSort::Created;
+    let issues_direction = types::Order::Desc;
+
+    let issues_response = issues_client.list(
+        issues_filter,
+        issues_state,
         &config.repo_owner,
         &config.repo_name,
-        None, // state
-        None, // labels
-        None, // sort
-        None, // direction
+        issues_sort,
+        issues_direction,
         None, // since
+        false, // assignee
+        false, // creator
+        false, // mentioned
+        false, // labels
         None, // per_page
         None, // page
-    ).context("Failed to list issues from GitHub")?;
+    ).await.context("Failed to list issues from GitHub")?;
+    
+    let issues = issues_response.body;
 
     for issue in issues {
         let labels: Vec<String> = issue.labels
@@ -211,7 +225,7 @@ fn sync_github_to_local(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn sync_local_to_github(config: &Config, file_path: &Path) -> Result<()> {
+async fn sync_local_to_github(config: &Config, file_path: &Path) -> Result<()> {
     if !file_path.is_file() || file_path.extension().map_or(true, |ext| ext != "md") {
         return Ok(());
     }
@@ -233,14 +247,26 @@ fn sync_local_to_github(config: &Config, file_path: &Path) -> Result<()> {
         .and_then(|n| n.parse::<i64>().ok())
         .ok_or_else(|| anyhow::anyhow!("Could not determine issue number"))?;
 
-    // Update issue on GitHub
-    let mut update = octorust::types::IssuesUpdateRequest{
+    // Get the current state as a proper enum value
+    let state = if let Some(state_str) = frontmatter.get("state") {
+        match state_str.to_lowercase().as_str() {
+            "closed" => Some(types::State::Closed),
+            "open" => Some(types::State::Open),
+            _ => None
+        }
+    } else {
+        None
+    };
+    
+    // Create update request
+    let mut update = types::IssuesUpdateRequest {
         title: frontmatter.get("title").cloned(),
-        body: Some(body),
-        state: frontmatter.get("state").cloned(),
-        assignees: None,
+        body: Some(body.clone()),
+        state,
+        assignee: None,
+        assignees: vec![],
         milestone: None,
-        labels: None
+        labels: vec![],
     };
     
     if let Some(labels_str) = frontmatter.get("labels") {
@@ -251,7 +277,9 @@ fn sync_local_to_github(config: &Config, file_path: &Path) -> Result<()> {
             .collect();
         
         if !labels.is_empty() {
-            update.labels = Some(labels);
+            update.labels = labels.into_iter()
+                .map(|label| types::IssuesCreateRequestLabelsOneOf::String(label))
+                .collect();
         }
     }
 
@@ -260,7 +288,7 @@ fn sync_local_to_github(config: &Config, file_path: &Path) -> Result<()> {
         &config.repo_name,
         issue_number,
         &update,
-    ).context(format!("Failed to update issue #{} on GitHub", issue_number))?;
+    ).await.context(format!("Failed to update issue #{} on GitHub", issue_number))?;
 
     println!("Updated issue #{} on GitHub from {}", issue_number, file_path.display());
     Ok(())
