@@ -36,7 +36,7 @@ fn main() -> Result<()> {
 
     let matches = App::new("GitHub Issues Sync")
         .version("1.0")
-        .author("RetasksTeam")
+        .author("Eugen Soloviov (@suenot)")
         .about("Synchronizes GitHub issues with a local directory")
         .arg(
             Arg::with_name("issues-dir")
