@@ -169,7 +169,7 @@ async fn sync_github_to_local(config: &Config) -> Result<()> {
         types::Filter::All,
         types::IssuesListState::All,
         &config.repo_owner,
-        issues_sort(types::IssuesListSort::Created),
+        types::IssuesListSort::Created,
         types::Order::Desc,
         None, 
         false, 
@@ -186,10 +186,9 @@ async fn sync_github_to_local(config: &Config) -> Result<()> {
         let labels: Vec<String> = issue.labels
             .iter()
             .filter_map(|label| {
-                if let types::LabelsOneOf::Json(json_label) = label {
-                    json_label.name.clone()
-                } else {
-                    None
+                match label {
+                    types::LabelItem::Simple(simple_label) => simple_label.name.clone(),
+                    _ => None
                 }
             })
             .collect();
@@ -197,7 +196,7 @@ async fn sync_github_to_local(config: &Config) -> Result<()> {
         let local_issue = Issue {
             number: issue.number,
             title: issue.title,
-            body: issue.body,
+            body: Some(issue.body),
             state: issue.state,
             labels,
         };
@@ -260,17 +259,10 @@ async fn sync_local_to_github(config: &Config, file_path: &Path) -> Result<()> {
         None
     };
     
-    // Create the title as TitleOneOf if provided
-    let title = if let Some(title_str) = frontmatter.get("title") {
-        Some(types::TitleOneOf::String(title_str.clone()))
-    } else {
-        None
-    };
-    
-    // Create update request
+    // Create update request with required empty string for assignee
     let mut update = types::IssuesUpdateRequest {
-        title,
-        body: body,
+        title: None,
+        body: Some(body),
         state,
         assignee: String::new(),
         assignees: vec![],
@@ -278,6 +270,12 @@ async fn sync_local_to_github(config: &Config, file_path: &Path) -> Result<()> {
         labels: vec![],
     };
     
+    // Set title if available
+    if let Some(title) = frontmatter.get("title") {
+        update.title = Some(types::TitleOneOf::String(title.clone()));
+    }
+    
+    // Process labels
     if let Some(labels_str) = frontmatter.get("labels") {
         let labels: Vec<String> = labels_str
             .split(',')
@@ -333,13 +331,4 @@ fn parse_markdown_file(content: &str) -> Result<(HashMap<String, String>, String
     }
 
     Ok((frontmatter, body))
-}
-
-// Helper function to create a sort parameter (to address the issues with types)
-fn issues_sort(sort: types::IssuesListSort) -> &'static str {
-    match sort {
-        types::IssuesListSort::Created => "created",
-        types::IssuesListSort::Updated => "updated",
-        types::IssuesListSort::Comments => "comments",
-    }
 }
