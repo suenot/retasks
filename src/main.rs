@@ -34,46 +34,7 @@ fn main() -> Result<()> {
     // Create a tokio runtime for async operations
     let rt = Runtime::new().context("Failed to create tokio runtime")?;
 
-    let matches = App::new("GitHub Issues Sync")
-        .version("1.0")
-        .author("RetasksTeam")
-        .about("Synchronizes GitHub issues with a local directory")
-        .arg(
-            Arg::with_name("issues-dir")
-                .long("issues-dir")
-                .value_name("DIR")
-                .help("Sets the directory for issues (default: ./issues)")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("watch")
-                .long("watch")
-                .help("Watch for changes and sync automatically"),
-        )
-        .arg(
-            Arg::with_name("token")
-                .long("token")
-                .value_name("TOKEN")
-                .help("GitHub API token")
-                .required(true)
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("repo")
-                .long("repo")
-                .value_name("OWNER/REPO")
-                .help("GitHub repository in format owner/repo")
-                .required(true)
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("interval")
-                .long("interval")
-                .value_name("SECONDS")
-                .help("Sync interval in seconds when using --watch (default: 300)")
-                .takes_value(true),
-        )
-        .get_matches();
+    let matches = get_app_args();
 
     let repo_parts: Vec<&str> = matches
         .value_of("repo")
@@ -154,6 +115,50 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+// Moved argument parsing into a separate function for testability
+fn get_app_args() -> clap::ArgMatches<'static> {
+    App::new("Retasks")
+        .version("1.0")
+        .author("Eugen Soloviov (@suenot)")
+        .about("Synchronizes GitHub issues with a local directory")
+        .arg(
+            Arg::with_name("issues-dir")
+                .long("issues-dir")
+                .value_name("DIR")
+                .help("Sets the directory for issues (default: ./issues)")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("watch")
+                .long("watch")
+                .help("Watch for changes and sync automatically"),
+        )
+        .arg(
+            Arg::with_name("token")
+                .long("token")
+                .value_name("TOKEN")
+                .help("GitHub API token")
+                .required(true)
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("repo")
+                .long("repo")
+                .value_name("OWNER/REPO")
+                .help("GitHub repository in format owner/repo")
+                .required(true)
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("interval")
+                .long("interval")
+                .value_name("SECONDS")
+                .help("Sync interval in seconds when using --watch (default: 300)")
+                .takes_value(true),
+        )
+        .get_matches()
 }
 
 async fn sync_github_to_local(config: &Config) -> Result<()> {
@@ -326,4 +331,32 @@ fn parse_markdown_file(content: &str) -> Result<(HashMap<String, String>, String
     }
 
     Ok((frontmatter, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_markdown_file() {
+        let content = r#"---
+number: 42
+title: Test Issue
+state: open
+labels: [bug, enhancement]
+---
+
+This is the body of the issue.
+
+It has multiple lines."#;
+
+        let result = parse_markdown_file(content).unwrap();
+        let (frontmatter, body) = result;
+
+        assert_eq!(frontmatter.get("number"), Some(&"42".to_string()));
+        assert_eq!(frontmatter.get("title"), Some(&"Test Issue".to_string()));
+        assert_eq!(frontmatter.get("state"), Some(&"open".to_string()));
+        assert_eq!(frontmatter.get("labels"), Some(&"[bug, enhancement]".to_string()));
+        assert_eq!(body, "This is the body of the issue.\n\nIt has multiple lines.");
+    }
 }
