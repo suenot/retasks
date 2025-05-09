@@ -183,13 +183,12 @@ async fn sync_github_to_local(config: &Config) -> Result<()> {
     let issues = issues_response.body;
 
     for issue in issues {
+        // Extract labels from the issue
         let labels: Vec<String> = issue.labels
             .iter()
             .filter_map(|label| {
-                match label {
-                    types::LabelItem::Simple(simple_label) => simple_label.name.clone(),
-                    _ => None
-                }
+                // Try to extract the label name based on the structure
+                label.name.clone()
             })
             .collect();
 
@@ -262,7 +261,7 @@ async fn sync_local_to_github(config: &Config, file_path: &Path) -> Result<()> {
     // Create update request with required empty string for assignee
     let mut update = types::IssuesUpdateRequest {
         title: None,
-        body: Some(body),
+        body: body, // No need for Some() wrapper here as the type is String, not Option<String>
         state,
         assignee: String::new(),
         assignees: vec![],
