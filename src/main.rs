@@ -36,7 +36,7 @@ fn main() -> Result<()> {
 
     let matches = App::new("GitHub Issues Sync")
         .version("1.0")
-        .author("Eugen Soloviov (@suenot)")
+        .author("RetasksTeam")
         .about("Synchronizes GitHub issues with a local directory")
         .arg(
             Arg::with_name("issues-dir")
@@ -114,15 +114,15 @@ fn main() -> Result<()> {
         
         let config_arc = Arc::new(config);
         let config_clone = Arc::clone(&config_arc);
-        let rt_clone = rt.clone();
         
         // Thread for periodic GitHub to local sync
+        let rt_handle = rt.handle().clone();
         thread::spawn(move || {
             let config = config_clone;
             loop {
                 thread::sleep(config.sync_interval);
                 println!("Performing scheduled sync from GitHub to local...");
-                if let Err(e) = rt_clone.block_on(sync_github_to_local(&config)) {
+                if let Err(e) = rt_handle.block_on(sync_github_to_local(&config)) {
                     eprintln!("Error syncing from GitHub: {}", e);
                 }
             }
@@ -130,7 +130,7 @@ fn main() -> Result<()> {
 
         // Watch local directory for changes
         let config_clone = Arc::clone(&config_arc);
-        let rt_clone = rt.clone();
+        let rt_handle = rt.handle().clone();
         let mut hotwatch = Hotwatch::new().context("Failed to initialize hotwatch")?;
         
         hotwatch.watch(&config_arc.issues_dir, move |event: Event| {
@@ -138,7 +138,7 @@ fn main() -> Result<()> {
                 if path.extension().map_or(false, |ext| ext == "md") {
                     println!("Local file changed: {:?}", path);
                     let config = &config_clone;
-                    if let Err(e) = rt_clone.block_on(sync_local_to_github(config, &path)) {
+                    if let Err(e) = rt_handle.block_on(sync_local_to_github(config, &path)) {
                         eprintln!("Error syncing to GitHub: {}", e);
                     }
                 }
@@ -163,25 +163,21 @@ async fn sync_github_to_local(config: &Config) -> Result<()> {
     )?;
 
     let issues_client = client.issues();
-    let issues_filter = types::Filter::All;
-    let issues_state = types::IssuesListState::All;
-    let issues_sort = types::IssuesListSort::Created;
-    let issues_direction = types::Order::Desc;
-
+    
+    // List issues with the correct parameters
     let issues_response = issues_client.list(
-        issues_filter,
-        issues_state,
+        types::Filter::All,
+        types::IssuesListState::All,
         &config.repo_owner,
-        &config.repo_name,
-        issues_sort,
-        issues_direction,
-        None, // since
-        false, // assignee
-        false, // creator
-        false, // mentioned
-        false, // labels
-        None, // per_page
-        None, // page
+        issues_sort(types::IssuesListSort::Created),
+        types::Order::Desc,
+        None, 
+        false, 
+        false, 
+        false, 
+        false, 
+        100, 
+        1
     ).await.context("Failed to list issues from GitHub")?;
     
     let issues = issues_response.body;
@@ -189,7 +185,13 @@ async fn sync_github_to_local(config: &Config) -> Result<()> {
     for issue in issues {
         let labels: Vec<String> = issue.labels
             .iter()
-            .filter_map(|label| label.name.clone())
+            .filter_map(|label| {
+                if let types::LabelsOneOf::Json(json_label) = label {
+                    json_label.name.clone()
+                } else {
+                    None
+                }
+            })
             .collect();
 
         let local_issue = Issue {
@@ -258,12 +260,19 @@ async fn sync_local_to_github(config: &Config, file_path: &Path) -> Result<()> {
         None
     };
     
+    // Create the title as TitleOneOf if provided
+    let title = if let Some(title_str) = frontmatter.get("title") {
+        Some(types::TitleOneOf::String(title_str.clone()))
+    } else {
+        None
+    };
+    
     // Create update request
     let mut update = types::IssuesUpdateRequest {
-        title: frontmatter.get("title").cloned(),
-        body: Some(body.clone()),
+        title,
+        body: body,
         state,
-        assignee: None,
+        assignee: String::new(),
         assignees: vec![],
         milestone: None,
         labels: vec![],
@@ -324,4 +333,13 @@ fn parse_markdown_file(content: &str) -> Result<(HashMap<String, String>, String
     }
 
     Ok((frontmatter, body))
+}
+
+// Helper function to create a sort parameter (to address the issues with types)
+fn issues_sort(sort: types::IssuesListSort) -> &'static str {
+    match sort {
+        types::IssuesListSort::Created => "created",
+        types::IssuesListSort::Updated => "updated",
+        types::IssuesListSort::Comments => "comments",
+    }
 }
