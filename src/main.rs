@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{App, Arg};
-use hotwatch::{Event, EventKind, Hotwatch};
+use hotwatch::{Hotwatch, Event as HotwatchEvent};
 use octorust::{auth::Credentials, Client};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -127,17 +127,18 @@ fn main() -> Result<()> {
         let config_clone = Arc::clone(&config_arc);
         let mut hotwatch = Hotwatch::new().context("Failed to initialize hotwatch")?;
         
-        hotwatch.watch(&config_arc.issues_dir, move |event: Event| {
-            if let EventKind::Modify(_) = event.kind {
-                if let Some(path) = event.paths.first() {
+        hotwatch.watch(&config_arc.issues_dir, move |event: HotwatchEvent| {
+            match event {
+                HotwatchEvent::Write(path) | HotwatchEvent::Modify(path) => {
                     if path.extension().map_or(false, |ext| ext == "md") {
                         println!("Local file changed: {:?}", path);
                         let config = &config_clone;
-                        if let Err(e) = sync_local_to_github(config, path) {
+                        if let Err(e) = sync_local_to_github(config, &path) {
                             eprintln!("Error syncing to GitHub: {}", e);
                         }
                     }
-                }
+                },
+                _ => {}
             }
         }).context("Failed to watch directory")?;
 
@@ -156,9 +157,10 @@ fn sync_github_to_local(config: &Config) -> Result<()> {
     let client = Client::new(
         "github-issues-sync".to_string(),
         Credentials::Token(config.token.clone()),
-    );
+    )?;
 
-    let issues = client.issues().list(
+    let issues_client = client.issues();
+    let issues = issues_client.list(
         &config.repo_owner,
         &config.repo_name,
         None, // state
@@ -224,7 +226,7 @@ fn sync_local_to_github(config: &Config, file_path: &Path) -> Result<()> {
     let client = Client::new(
         "github-issues-sync".to_string(),
         Credentials::Token(config.token.clone()),
-    );
+    )?;
 
     // Extract issue number from filename or frontmatter
     let issue_number = frontmatter.get("number")
@@ -232,10 +234,14 @@ fn sync_local_to_github(config: &Config, file_path: &Path) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Could not determine issue number"))?;
 
     // Update issue on GitHub
-    let mut update = octorust::types::IssuesUpdateRequest::new();
-    update.title = frontmatter.get("title").cloned();
-    update.body = Some(body);
-    update.state = frontmatter.get("state").cloned();
+    let mut update = octorust::types::IssuesUpdateRequest{
+        title: frontmatter.get("title").cloned(),
+        body: Some(body),
+        state: frontmatter.get("state").cloned(),
+        assignees: None,
+        milestone: None,
+        labels: None
+    };
     
     if let Some(labels_str) = frontmatter.get("labels") {
         let labels: Vec<String> = labels_str
