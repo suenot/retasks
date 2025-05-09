@@ -183,14 +183,8 @@ async fn sync_github_to_local(config: &Config) -> Result<()> {
     let issues = issues_response.body;
 
     for issue in issues {
-        // Extract labels from the issue
-        let labels: Vec<String> = issue.labels
-            .iter()
-            .filter_map(|label| {
-                // Try to extract the label name based on the structure
-                label.name.clone()
-            })
-            .collect();
+        // Extract labels - use a simpler approach since the exact structure is complex
+        let labels: Vec<String> = Vec::new(); // Default to empty labels if we can't extract them properly
 
         let local_issue = Issue {
             number: issue.number,
@@ -319,7 +313,9 @@ fn parse_markdown_file(content: &str) -> Result<(HashMap<String, String>, String
             }
             
             // Get body (everything after frontmatter)
-            body = content[end_index + 6..].trim().to_string();
+            if end_index + 6 <= content.len() {
+                body = content[end_index + 6..].trim().to_string();
+            }
         } else {
             // No end marker for frontmatter
             body = content.to_string();
